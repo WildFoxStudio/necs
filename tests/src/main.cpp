@@ -99,6 +99,7 @@ TEST_F(CPagedAllocatorFixture, AllocateThenFreeMultiplePages) {
 	AllocatorUnderTest = nullptr;
 }
 
+#pragma endregion
 
 #pragma region CMatrixAllocator
 
@@ -556,10 +557,60 @@ TEST(CWorldObjectTest, MustRegisterCDOComponentsCorrectly)
 	EXPECT_EQ(object.GetCDOComponentsInfo().at(1).Alignment, ExpectedComponentsInfo.at(1).Alignment);
 }
 
-#pragma endregion
+TEST(CWorldObjectTest, MustCreateRuntimeComponents)
+{
+	struct ComponentFoo
+	{
+		char Foo[4];
+	};
+
+	struct ComponentBar
+	{
+		uint32_t Bar[4];
+	};
+
+	class CTestObject : public CWorldObject
+	{
+	public:
+		CTestObject(const DWorldObjectInitializer& initializer) :CWorldObject(initializer, true) {
+		}
+
+		void Tick() override {
+			NewComponent<ComponentFoo>();
+			NewComponent<ComponentBar>();
+		}
+	};
+
+	CAlignedAllocatorMock runtimeComponentAllocatorMock;
+	CWorldObjectCDOMock cdoMock;
+	const std::vector<CEntityComponentMetadata> componentsInfo{ };
+	EXPECT_CALL(cdoMock, GetCDOComponentsInfo).WillRepeatedly(::testing::ReturnRef(componentsInfo));
+	EXPECT_CALL(cdoMock, GetClassSize).WillRepeatedly(::testing::Return(sizeof(CTestObject)));
+	EXPECT_CALL(cdoMock, ComputeComponentsMaxSizeForAllocation).WillRepeatedly(::testing::Return(0));
+
+	DWorldObjectInitializer initializer{};
+	initializer.StaticClassCDO = &cdoMock;
+	initializer.ClassSize = sizeof(CTestObject);
+	initializer.ClassAlignment = alignof(CTestObject);
+	initializer.RuntimeComponentsAllocator = &runtimeComponentAllocatorMock;
+
+
+	ComponentFoo foo{};
+	ComponentBar bar{};
+	EXPECT_CALL(runtimeComponentAllocatorMock, Allocate).Times(2).WillOnce(::testing::Return((void*)&foo)).WillOnce(::testing::Return((void*)&bar));
+	EXPECT_CALL(runtimeComponentAllocatorMock, Free).Times(2).WillRepeatedly([&](void* ptr) {
+		// Custom logic for the first call
+		EXPECT_TRUE(ptr == (void*)&foo || ptr == (void*)&bar);
+		});
+
+	CTestObject object(initializer);
+	object.Tick();
+}
 
 
 #pragma endregion
+
+
 
 int main(int argc, char* argv[])
 {

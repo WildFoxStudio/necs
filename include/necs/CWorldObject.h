@@ -44,10 +44,12 @@
 #include <functional>
 #include <string>
 #include <cmath>
+#include <stdexcept>
 
 #include "clow/gpalloc.h"
 
 #include "necs/IWorldObjectCDO.h"
+#include "necs/IAlignedAllocator.h"
 
 struct IWorldObjectPendingDestroyNotifier
 {
@@ -65,6 +67,7 @@ struct DWorldObjectInitializer
 	uint64_t ClassSize{};
 	uint64_t ClassAlignment{};
 	IWorldObjectPendingDestroyNotifier* PendingDestroyNotifier{};
+	IAlignedAllocator* RuntimeComponentsAllocator{};
 };
 
 inline bool IsPowerOfTwo(const uint64_t value)
@@ -217,7 +220,6 @@ private:
 	gpalloc_t _allocator{};
 };
 
-
 class CTickable
 {
 public:
@@ -233,10 +235,6 @@ private:
 	 */
 	const bool _canEverTick;
 };
-
-
-
-
 
 class CDestroyable
 {
@@ -258,7 +256,6 @@ private:
 	std::function<void(void)> _onPendingDestroySetCallback{};
 };
 
-
 /**
  * /brief Base world object class.
  * With archetype it means that the class is constructed with the slack, with the least enough memory, gathered from the CDO to hold the archetype's components in contiguos memory right after the world object.
@@ -270,7 +267,7 @@ class CWorldObject : public CWorldObjectCDO, public CTickable, public CDestroyab
 public:
 	std::set<std::string> Tags;
 
-	CWorldObject(const DWorldObjectInitializer& initializer, const bool canEverTick) : CWorldObjectCDO(initializer.StaticClassCDO == nullptr, initializer.ClassSize, initializer.ClassAlignment), CTickable(canEverTick), CDestroyable(initializer.PendingDestroyNotifier), CWorldObjectArchetypesComponentsContainer(this, initializer.StaticClassCDO) {
+	CWorldObject(const DWorldObjectInitializer& initializer, const bool canEverTick) : CWorldObjectCDO(initializer.StaticClassCDO == nullptr, initializer.ClassSize, initializer.ClassAlignment), CTickable(canEverTick), CDestroyable(initializer.PendingDestroyNotifier), CWorldObjectArchetypesComponentsContainer(this, initializer.StaticClassCDO), _runtimeComponentsAllocator(initializer.RuntimeComponentsAllocator) {
 		// TODO remove this check
 		if (initializer.StaticClassCDO)
 		{
@@ -288,7 +285,7 @@ public:
 		if (IsCDO())
 		{
 			StaticRegisterNewComponentUnknown(sizeof(T), alignof(T));
-			// Allocate object with new
+			// Allocate object with new since it's easier just for the CDO
 			return std::make_shared<T>(std::forward<Args>(args)...);
 		}
 
@@ -308,6 +305,23 @@ public:
 		}
 
 		// Allocate object with new. TODO use pool allocator memory
-		return std::make_shared<T>(std::forward<Args>(args)...);
+		//return std::make_shared<T>(std::forward<Args>(args)...);
+
+		// Allocate with runtime component allocator
+		componentPtr = reinterpret_cast<T*>(_runtimeComponentsAllocator->Allocate(sizeof(std::decay_t<T>), alignof(std::decay_t<T>)));
+		if (!componentPtr)
+			throw std::runtime_error("CWorldEntity failed to allocate runtime component!");
+
+		// Always alias using placement new, otherwise dynamic type is undefined leading to UB.
+		new(componentPtr) T(std::forward<Args>(args)...);
+		componentPtr = std::launder(componentPtr);
+
+		return std::shared_ptr<std::decay_t<T>>(componentPtr, [this](T* ptr) {
+			/*Free from reserved pool*/
+			_runtimeComponentsAllocator->Free(reinterpret_cast<void*>(ptr));
+			});
 	};
+
+private:
+	IAlignedAllocator* const _runtimeComponentsAllocator;
 };
